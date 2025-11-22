@@ -12,129 +12,102 @@ class WikipediaSearcher:
         return input("Введите поисковый запрос: ").strip()
 
     def encode_query(self, query):
-        return urllib.parse.quote(query)
+        # Правильное кодирование для URL с учетом русских символов
+        return urllib.parse.quote(query.encode('utf-8'))
 
-    def make_request(self, encoded_query, search_type="standard"):
-        """Разные типы поиска для лучших результатов"""
-        if search_type == "exact":
-            # Поиск по точному заголовку
-            url = f"https://ru.wikipedia.org/w/api.php?action=query&format=json&titles={encoded_query}"
-        elif search_type == "suggest":
-            # Поиск через API подсказок (как в поисковой строке на сайте)
-            url = f"https://ru.wikipedia.org/w/api.php?action=opensearch&format=json&search={encoded_query}&limit=10"
-        else:
-            # Стандартный поиск
-            params = {
-                'action': 'query',
-                'list': 'search',
-                'format': 'json',
-                'srsearch': encoded_query,
-                'srlimit': 10,
-                'srprop': 'size'  # Добавляем информацию о размере статьи
-            }
-            url = f"{self.BASE_URL}?{urllib.parse.urlencode(params)}"
+    def search_with_api(self, query):
+        """Используем API Wikipedia для поиска"""
+        encoded_query = self.encode_query(query)
+        
+        # Пробуем разные варианты API запросов
+        api_methods = [
+            # Метод opensearch (похож на автодополнение в Wikipedia)
+            f"https://ru.wikipedia.org/w/api.php?action=opensearch&search={encoded_query}&limit=10&namespace=0&format=json",
+            # Метод query (стандартный поиск)
+            f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded_query}&srlimit=10&format=json",
+            # Метод для поиска по заголовкам
+            f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded_query}&srwhat=title&srlimit=10&format=json"
+        ]
+        
+        for api_url in api_methods:
+            try:
+                req = urllib.request.Request(
+                    api_url,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    }
+                )
+                
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    results = self.parse_api_response(data, api_url)
+                    if results:
+                        return results
+            except Exception as e:
+                print(f"Ошибка при запросе к API: {e}")
+                continue
+                
+        return []
+
+    def parse_api_response(self, data, api_url):
+        """Парсим ответ от API Wikipedia"""
+        results = []
+        
+        # Обработка ответа от opensearch API
+        if 'opensearch' in api_url:
+            if isinstance(data, list) and len(data) > 1:
+                titles = data[1]
+                for title in titles:
+                    pageid = self.get_pageid_from_title(title)
+                    results.append({
+                        'title': title,
+                        'pageid': pageid
+                    })
+        
+        # Обработка ответа от query API
+        elif 'query' in api_url:
+            if 'query' in data and 'search' in data['query']:
+                for item in data['query']['search']:
+                    results.append({
+                        'title': item['title'],
+                        'pageid': str(item['pageid'])
+                    })
+        
+        return results
+
+    def get_pageid_from_title(self, title):
+        """Получаем pageid по заголовку статьи"""
+        encoded_title = self.encode_query(title)
+        url = f"https://ru.wikipedia.org/w/api.php?action=query&format=json&titles={encoded_title}"
         
         req = urllib.request.Request(
             url,
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         )
         
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode())
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                pages = data.get('query', {}).get('pages', {})
+                for pageid in pages.keys():
+                    if pageid != '-1':
+                        return str(pageid)
+        except:
+            pass
+        return None
 
-    def parse_results(self, data, search_type="standard"):
-        if search_type == "suggest":
-            # Обработка ответа от opensearch API
-            if len(data) >= 2:
-                titles = data[1]
-                urls = data[3]
-                results = []
-                for i, title in enumerate(titles):
-                    # Извлекаем pageid из URL
-                    pageid = None
-                    if i < len(urls):
-                        # Пытаемся извлечь pageid из URL
-                        url_parts = urls[i].split('curid=')
-                        if len(url_parts) > 1:
-                            pageid = url_parts[1]
-                        else:
-                            # Если нет curid, используем заголовок для формирования URL
-                            pageid = title
-                    results.append({
-                        'title': title,
-                        'pageid': pageid
-                    })
-                return results
-            return []
-        
-        if search_type == "exact":
-            # Обработка точного поиска по заголовку
-            if 'query' in data and 'pages' in data['query']:
-                pages = data['query']['pages']
-                results = []
-                for pageid, pageinfo in pages.items():
-                    if pageid != '-1':  # -1 означает, что страница не найдена
-                        results.append({
-                            'title': pageinfo['title'],
-                            'pageid': pageid
-                        })
-                return results
-            return []
-        
-        # Стандартный поиск
-        if 'query' not in data or 'search' not in data['query']:
-            return []
-        
-        search_info = data.get('query', {}).get('searchinfo', {})
-        total_hits = search_info.get('totalhits', 0)
-        print(f"Найдено статей: {total_hits}")
-        
-        results = []
-        for item in data['query']['search']:
-            results.append({
-                'title': item['title'],
-                'pageid': item['pageid']
-            })
-        
-        return results
-
-    def search_wikipedia(self, query):
-        """Пробуем разные методы поиска"""
-        encoded_query = self.encode_query(query)
-        
-        # Сначала пробуем точный поиск по заголовку
-        print("Пробуем точный поиск...")
-        exact_data = self.make_request(encoded_query, "exact")
-        exact_results = self.parse_results(exact_data, "exact")
-        
-        if exact_results:
-            return exact_results
-        
-        # Если точный поиск не дал результатов, пробуем поиск с подсказками
-        print("Пробуем поиск с подсказками...")
-        suggest_data = self.make_request(encoded_query, "suggest")
-        suggest_results = self.parse_results(suggest_data, "suggest")
-        
-        if suggest_results:
-            return suggest_results
-        
-        # Если и это не помогло, используем стандартный поиск
-        print("Пробуем стандартный поиск...")
-        standard_data = self.make_request(encoded_query, "standard")
-        return self.parse_results(standard_data, "standard")
-
-    def display_results(self, results):
+    def display_results(self, results, query):
         if not results:
-            print("По вашему запросу ничего не найдено.")
+            print(f"По запросу '{query}' не найдено подходящих статей.")
             return False
 
-        print(f"\nРезультаты поиска:")
-        print("-" * 40)
+        print(f"\nРезультаты поиска для '{query}':")
+        print("=" * 60)
         
         for i, item in enumerate(results, 1):
             print(f"{i}. {item['title']}")
         
-        print("-" * 40)
+        print("=" * 60)
         return True
 
     def select_article(self, results):
@@ -142,28 +115,26 @@ class WikipediaSearcher:
             try:
                 choice = input("\nВведите номер статьи для открытия (или 'q' для выхода): ").strip()
                 if choice.lower() == 'q':
-                    return None
+                    return None, None
                 choice = int(choice)
                 if 1 <= choice <= len(results):
-                    return results[choice-1]['pageid']
+                    return results[choice-1]['pageid'], results[choice-1]['title']
                 print(f"Пожалуйста, введите число от 1 до {len(results)}")
             except ValueError:
                 print("Пожалуйста, введите число.")
 
-    def open_in_browser(self, pageid, title=None):
-        if pageid is None:
-            return
-        
-        # Формируем URL разными способами в зависимости от того, что у нас есть
-        if pageid.isdigit() or (pageid[0] == '-' and pageid[1:].isdigit()):
-            # Если pageid - число, используем curid
+    def open_in_browser(self, pageid, title, query):
+        if pageid:
             url = f"https://ru.wikipedia.org/w/index.php?curid={pageid}"
-        else:
-            # Если pageid - это текст (заголовок), используем его для формирования URL
-            encoded_title = self.encode_query(pageid)
+        elif title:
+            encoded_title = self.encode_query(title)
             url = f"https://ru.wikipedia.org/wiki/{encoded_title}"
+        else:
+            # Если ничего не нашли, открываем страницу поиска
+            encoded_query = self.encode_query(query)
+            url = f"https://ru.wikipedia.org/w/index.php?search={encoded_query}"
         
-        print(f"Открываю статью в браузере...")
+        print(f"Открываю: {url}")
         webbrowser.open(url)
 
     def run(self):
@@ -173,13 +144,18 @@ class WikipediaSearcher:
                 print("Запрос не может быть пустым.")
                 return
 
-            results = self.search_wikipedia(query)
+            print(f"Ищем '{query}' в Wikipedia...")
+            results = self.search_with_api(query)
 
-            if self.display_results(results):
-                pageid = self.select_article(results)
-                self.open_in_browser(pageid)
+            if self.display_results(results, query):
+                pageid, title = self.select_article(results)
+                self.open_in_browser(pageid, title, query)
             else:
-                print("Попробуйте изменить поисковый запрос.")
+                # Если не нашли результатов, открываем страницу поиска
+                print("Открываю страницу поиска Wikipedia...")
+                encoded_query = self.encode_query(query)
+                url = f"https://ru.wikipedia.org/w/index.php?search={encoded_query}"
+                webbrowser.open(url)
 
         except Exception as e:
             print(f"Произошла ошибка: {e}")
