@@ -3,6 +3,7 @@ import urllib.parse
 import urllib.request
 import json
 import webbrowser
+import re
 
 class WikipediaSearcher:
     def __init__(self):
@@ -12,68 +13,101 @@ class WikipediaSearcher:
         return input("Введите поисковый запрос: ").strip()
 
     def encode_query(self, query):
-        # Правильное кодирование для URL с учетом русских символов
-        return urllib.parse.quote(query.encode('utf-8'))
+        return urllib.parse.quote(query)
 
-    def search_with_api(self, query):
-        """Используем API Wikipedia для поиска"""
+    def search_using_web_interface(self, query):
+        """Имитируем поиск через веб-интерфейс Wikipedia"""
         encoded_query = self.encode_query(query)
         
-        # Пробуем разные варианты API запросов
-        api_methods = [
-            # Метод opensearch (похож на автодополнение в Wikipedia)
-            f"https://ru.wikipedia.org/w/api.php?action=opensearch&search={encoded_query}&limit=10&namespace=0&format=json",
-            # Метод query (стандартный поиск)
-            f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded_query}&srlimit=10&format=json",
-            # Метод для поиска по заголовкам
-            f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded_query}&srwhat=title&srlimit=10&format=json"
-        ]
+        # Получаем HTML страницу поиска
+        url = f"https://ru.wikipedia.org/w/index.php?search={encoded_query}&title=Служебная:Поиск&profile=advanced&fulltext=1&ns0=1"
         
-        for api_url in api_methods:
-            try:
-                req = urllib.request.Request(
-                    api_url,
-                    headers={
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                    }
-                )
-                
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    data = json.loads(response.read().decode('utf-8'))
-                    results = self.parse_api_response(data, api_url)
-                    if results:
-                        return results
-            except Exception as e:
-                print(f"Ошибка при запросе к API: {e}")
-                continue
-                
-        return []
+        req = urllib.request.Request(
+            url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3'
+            }
+        )
+        
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                html_content = response.read().decode('utf-8')
+                return self.parse_search_results(html_content, query)
+        except Exception as e:
+            print(f"Ошибка при получении страницы поиска: {e}")
+            return []
 
-    def parse_api_response(self, data, api_url):
-        """Парсим ответ от API Wikipedia"""
+    def parse_search_results(self, html, query):
+        """Парсим HTML страницы поиска для извлечения результатов"""
         results = []
         
-        # Обработка ответа от opensearch API
-        if 'opensearch' in api_url:
-            if isinstance(data, list) and len(data) > 1:
-                titles = data[1]
-                for title in titles:
-                    pageid = self.get_pageid_from_title(title)
-                    results.append({
-                        'title': title,
-                        'pageid': pageid
-                    })
+        # Ищем заголовки статей в результатах поиска
+        # Паттерн для поиска заголовков в HTML
+        title_patterns = [
+            r'<div class="searchresult">.*?<a[^>]*href="/wiki/([^"]+)"[^>]*>([^<]+)</a>',
+            r'<li[^>]*class="mw-search-result"[^>]*>.*?<a[^>]*href="/wiki/([^"]+)"[^>]*>([^<]+)</a>',
+            r'<a[^>]*href="/wiki/([^"]+)"[^>]*title="([^"]+)"[^>]*>'
+        ]
         
-        # Обработка ответа от query API
-        elif 'query' in api_url:
-            if 'query' in data and 'search' in data['query']:
-                for item in data['query']['search']:
-                    results.append({
-                        'title': item['title'],
-                        'pageid': str(item['pageid'])
-                    })
+        for pattern in title_patterns:
+            matches = re.findall(pattern, html, re.DOTALL)
+            for match in matches:
+                if len(match) == 2:
+                    page_slug, title = match
+                    # Декодируем HTML-сущности в заголовке
+                    title = self.decode_html_entities(title)
+                    
+                    # Получаем pageid по заголовку
+                    pageid = self.get_pageid_from_title(title)
+                    
+                    if title and page_slug and title not in [r['title'] for r in results]:
+                        results.append({
+                            'title': title,
+                            'pageid': pageid,
+                            'slug': page_slug
+                        })
+                        
+                    if len(results) >= 10:  # Ограничиваем количество результатов
+                        break
+        
+        # Если не нашли результатов стандартным способом, ищем альтернативными паттернами
+        if not results:
+            # Ищем в данных JSON, которые могут быть встроены в страницу
+            json_pattern = r'wgSearchResults":\s*(\[.*?\])'
+            json_match = re.search(json_pattern, html)
+            if json_match:
+                try:
+                    json_data = json.loads(json_match.group(1))
+                    for item in json_data:
+                        if 'title' in item:
+                            title = item['title']
+                            pageid = self.get_pageid_from_title(title)
+                            results.append({
+                                'title': title,
+                                'pageid': pageid,
+                                'slug': title.replace(' ', '_')
+                            })
+                except:
+                    pass
         
         return results
+
+    def decode_html_entities(self, text):
+        """Декодирует HTML-сущности в тексте"""
+        replacements = {
+            '&quot;': '"',
+            '&amp;': '&',
+            '&lt;': '<',
+            '&gt;': '>',
+            '&nbsp;': ' ',
+            '&#91;': '[',
+            '&#93;': ']'
+        }
+        for entity, replacement in replacements.items():
+            text = text.replace(entity, replacement)
+        return text
 
     def get_pageid_from_title(self, title):
         """Получаем pageid по заголовку статьи"""
@@ -87,7 +121,7 @@ class WikipediaSearcher:
         
         try:
             with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode('utf-8'))
+                data = json.loads(response.read().decode())
                 pages = data.get('query', {}).get('pages', {})
                 for pageid in pages.keys():
                     if pageid != '-1':
@@ -98,7 +132,7 @@ class WikipediaSearcher:
 
     def display_results(self, results, query):
         if not results:
-            print(f"По запросу '{query}' не найдено подходящих статей.")
+            print(f"По запросу '{query}' ничего не найдено.")
             return False
 
         print(f"\nРезультаты поиска для '{query}':")
@@ -144,8 +178,8 @@ class WikipediaSearcher:
                 print("Запрос не может быть пустым.")
                 return
 
-            print(f"Ищем '{query}' в Wikipedia...")
-            results = self.search_with_api(query)
+            print(f"Ищем '{query}' через веб-интерфейс Wikipedia...")
+            results = self.search_using_web_interface(query)
 
             if self.display_results(results, query):
                 pageid, title = self.select_article(results)
